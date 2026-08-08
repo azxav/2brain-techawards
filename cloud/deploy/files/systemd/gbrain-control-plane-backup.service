@@ -1,0 +1,25 @@
+[Unit]
+Description=2Brain Cloud registry backup
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=gbrain-cp
+Group=gbrain-cp
+WorkingDirectory=/opt/gbrain-cp/cloud
+Environment=HOME=/var/lib/gbrain-cp
+EnvironmentFile=/etc/gbrain-cp/control-plane.env
+ExecStart=/usr/local/bin/bun run src/backup.ts
+TimeoutStartSec=15m
+StateDirectory=gbrain-cp
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

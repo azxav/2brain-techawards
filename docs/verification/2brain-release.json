@@ -1,0 +1,102 @@
+{
+  "issue": 34,
+  "release": "2Brain v1",
+  "generated_at": "2026-07-14T00:00:00.000Z",
+  "evidence": {
+    "full_test_run": {
+      "path": "docs/verification/2brain-full-test-run.md",
+      "status": "pass"
+    },
+    "trust_evidence": {
+      "path": "docs/verification/2brain-trust.md",
+      "status": "pass"
+    },
+    "security_matrix": {
+      "path": "docs/verification/2brain-security-matrix.md",
+      "status": "pass"
+    },
+    "design_evidence_ledger": {
+      "path": "docs/verification/2brain-design-evidence.md",
+      "status": "pass"
+    },
+    "accessibility_report": {
+      "path": "docs/verification/2brain-accessibility.md",
+      "status": "pass"
+    },
+    "performance_report": {
+      "path": "docs/verification/2brain-performance.md",
+      "status": "pass"
+    },
+    "export_inspection": {
+      "path": "docs/verification/2brain-export-inspection.md",
+      "status": "pass"
+    },
+    "retention_evidence": {
+      "path": "docs/verification/2brain-retention.md",
+      "status": "pass"
+    },
+    "recovery_evidence": {
+      "path": "docs/verification/2brain-recovery.md",
+      "status": "pass"
+    },
+    "rollback_evidence": {
+      "path": "docs/verification/2brain-rollback.md",
+      "status": "pass"
+    },
+    "primary_browser_journey": {
+      "path": "docs/verification/browser/browser-evidence.json",
+      "status": "pass"
+    },
+    "postgres_parity": {
+      "path": "docs/verification/2brain-postgres-parity.md",
+      "status": "pass"
+    }
+  },
+  "gates": {
+    "functional": {
+      "status": "pass",
+      "evidence": [
+        "full_test_run",
+        "primary_browser_journey",
+        "postgres_parity"
+      ]
+    },
+    "trust": {
+      "status": "pass",
+      "evidence": [
+        "trust_evidence",
+        "full_test_run",
+        "primary_browser_journey",
+        "postgres_parity"
+      ]
+    },
+    "security": {
+      "status": "pass",
+      "evidence": [
+        "security_matrix",
+        "export_inspection",
+        "postgres_parity"
+      ]
+    },
+    "experience": {
+      "status": "pass",
+      "evidence": [
+        "design_evidence_ledger",
+        "accessibility_report",
+        "performance_report",
+        "primary_browser_journey"
+      ]
+    },
+    "operations": {
+      "status": "pass",
+      "evidence": [
+        "export_inspection",
+        "retention_evidence",
+        "recovery_evidence",
+        "rollback_evidence",
+        "performance_report",
+        "postgres_parity"
+      ]
+    }
+  }
+}

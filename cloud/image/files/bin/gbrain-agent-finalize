@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# Agent-tier finalization for a 2Brain Agent Workspace (#57).
+#
+# Runs AFTER gbrain-cloud-init-finalize in the agent-tier cloud-init runcmd, so
+# every Brain-tier invariant — the inert-agent proofs included — has already
+# held on this VM before this script flips the agent on. This file is the one
+# place allowed to name, create, or require /etc/openclaw/agent.env; the
+# Brain-tier finalizer is contractually forbidden from doing so.
+#
+# Idempotent: a re-run converges. The marker file is rewritten with identical
+# content, the config sets are last-writer-wins with identical values, and
+# enable/restart/reload settle.
+set -euo pipefail
+
+ENV_FILE="${GBRAIN_ENV_FILE:-/etc/gbrain/workspace.env}"
+# The Brain-tier finalizer writes this file as its LAST act, after every service
+# is up and every #56 inert-agent proof has held.
+BRAIN_COMPLETE_MARKER="${GBRAIN_BRAIN_COMPLETE_MARKER:-/var/lib/gbrain/cloud-init-complete}"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "gbrain-agent-finalize must run as root" >&2
+  exit 2
+fi
+
+# Brain-tier finalization is a PRECONDITION, not merely an earlier list entry.
+# cloud-init runs every `runcmd` entry regardless of what the previous one
+# returned, so ordering alone gates nothing: on the first real agent VM the
+# Brain finalizer exited 2 and this script still minted the access token,
+# configured the gateway, enabled the unit, and replaced the Caddyfile over a
+# half-built Workspace. This check comes before any of that, and fails closed.
+if [[ ! -f "$BRAIN_COMPLETE_MARKER" ]]; then
+  echo "2Brain workspace finalization did not complete: $BRAIN_COMPLETE_MARKER is missing" >&2
+  exit 2
+fi
+
+# The two most likely real-VM failures are a gateway that never listens and a
+# unit that exits at startup, and the `openclaw config set` key spellings are
+# only statically verified against the pinned release — so both abort paths dump
+# the unit's own state rather than failing with a bare exit status. Neither
+# command prints a credential: the unit's EnvironmentFile carries only a boolean
+# marker, `systemctl status` reports argv and unit properties rather than
+# EnvironmentFile contents, and no secret reaches argv. The journal can only
+# contain what OpenClaw itself chose to log, and this output goes to the
+# root-only cloud-init log on this VM.
+agent_diagnostics() {
+  systemctl status gbrain-agent.service --no-pager >&2 || true
+  journalctl -u gbrain-agent.service -n 50 --no-pager >&2 || true
+}
+
+# Root extracts exactly one value from the Workspace environment: the
+# subdomain. Nothing else may cross — sourcing the file here would hand every
+# Platform Credential to this script's expansions and to everything it invokes.
+#
+# `grep -m 1` rather than a `head -n 1` stage: `head` closing a pipe early is
+# the SIGPIPE/pipefail hazard gbrain-cloud-init-finalize documents in its own
+# comments. `|| true` is what keeps a no-match `grep` — which exits 1, and under
+# `set -o pipefail` would abort the assignment — from skipping the diagnostic
+# below and leaving cloud-init with a silent failure.
+GBRAIN_SUBDOMAIN="$(grep -m 1 -E '^GBRAIN_SUBDOMAIN=' "$ENV_FILE" | cut -d= -f2- || true)"
+if [[ -z "$GBRAIN_SUBDOMAIN" ]]; then
+  echo "agent finalize requires GBRAIN_SUBDOMAIN in $ENV_FILE" >&2
+  exit 2
+fi
+# The value is interpolated into a Caddyfile and into a JSON origin list, so it
+# is validated to a bare lowercase DNS name rather than trusted. This also
+# rejects a quoted or whitespace-padded field, which the grep above would
+# otherwise carry through verbatim.
+if [[ ! "$GBRAIN_SUBDOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+  echo "GBRAIN_SUBDOMAIN is not a valid lowercase DNS name" >&2
+  exit 2
+fi
+
+# The deployment secret the shared native password is DERIVED from (#68).
+#
+# GBrain computes every native password as HMAC(GBRAIN_WORKSPACE_TOKEN_SECRET,
+# workspace, generation) and pins a fingerprint of that secret on the Agent
+# binding the first time it is used. If it is absent now and appears later — or
+# appears now and changes on a re-provision — every derived password silently
+# differs and native ingress closes permanently with
+# `agent_password_secret_changed`, with nothing on this VM to say why.
+#
+# So its presence is a PRECONDITION of finalizing an agent VM, checked before
+# anything is written. The value is deliberately NOT captured into a variable:
+# root reads only the subdomain out of this file, and a secret in this script's
+# environment would be inherited by every command it invokes, `sudo -u openclaw`
+# included. `grep -c` counts matching lines and prints only a number.
+#
+# `[^[:space:]]` rather than `.+`: `.+` also matches a value that is nothing but
+# spaces or tabs, which derives a password just as unusable as an absent one and
+# would have made this one more presence check. At least one non-whitespace
+# character must follow the `=`.
+if [[ "$(grep -c -E '^GBRAIN_WORKSPACE_TOKEN_SECRET=[^[:space:]]' "$ENV_FILE" || true)" -lt 1 ]]; then
+  echo "agent finalize requires GBRAIN_WORKSPACE_TOKEN_SECRET in $ENV_FILE" >&2
+  exit 2
+fi
+
+# The agent-scoped environment is a MARKER, not a secret store.
+#
+# #68 removed the generated Gateway token: the gateway now authenticates through
+# trusted-proxy identity headers injected by Caddy, and `gateway.auth.token` is
+# mutually exclusive with that mode. Nothing about the agent's authority is
+# carried in this file any more, so it holds exactly one boolean and no
+# password, token, Platform Credential, or Workspace service environment.
+#
+# It is still written, and still written FIRST, because the unit's
+# ConditionPathExists names it: that condition is what keeps an accidentally
+# enabled gbrain-agent.service from starting on a Brain-tier VM, where the
+# Brain finalizer is contractually forbidden from creating this path.
+#
+# Written atomically through a temporary that is created at its final
+# root:openclaw 0640 ownership and mode BEFORE any byte lands, so an abort can
+# never leave a half-written file that still satisfies the condition. `install`
+# rather than a global `umask 077`, which would persist for the rest of this
+# script under `set -e` and leave the rewritten Caddyfile unreadable to the
+# unprivileged `caddy` identity.
+install -d -m 0750 -o root -g openclaw /etc/openclaw
+install -m 0640 -o root -g openclaw /dev/null /etc/openclaw/agent.env.tmp
+# Same cleanup discipline as the Caddyfile temporary below: an abort between the
+# write and the mv must not leave a partial marker behind.
+trap 'rm -f /etc/openclaw/agent.env.tmp' EXIT
+printf 'GBRAIN_AGENT_RUNTIME_ENABLED=true\n' >/etc/openclaw/agent.env.tmp
+chown root:openclaw /etc/openclaw/agent.env.tmp
+chmod 0640 /etc/openclaw/agent.env.tmp
+mv /etc/openclaw/agent.env.tmp /etc/openclaw/agent.env
+trap - EXIT
+
+# Every OpenClaw invocation runs as the openclaw identity so the state stays
+# openclaw-owned under /var/lib/openclaw. The environment mirrors the unit's own
+# Environment= directives exactly, so the CLI and the service read one state
+# directory, and it is delivered through `env` rather than as sudo command-line
+# assignments, which sudo's env_reset/setenv policy may refuse.
+# One definition, used both to RUN the CLI and to expand the `$OPENCLAW_HOME`
+# display prefix the CLI prints back. Two independent copies of this path is how
+# a config read-back can silently target a file nothing writes.
+OPENCLAW_AGENT_HOME=/var/lib/openclaw
+openclaw_run() {
+  sudo -u openclaw env \
+    HOME="$OPENCLAW_AGENT_HOME" \
+    OPENCLAW_HOME="$OPENCLAW_AGENT_HOME" \
+    OPENCLAW_STATE_DIR="$OPENCLAW_AGENT_HOME/.openclaw" \
+    OPENCLAW_WORKSPACE_DIR="$OPENCLAW_AGENT_HOME/workspace" \
+    /usr/local/bin/openclaw "$@"
+}
+# `config set` edits the config FILE directly. That matters: the gateway's own
+# control-plane write RPCs are rate limited to three requests per minute per
+# device, which the two dozen assignments below would exhaust immediately.
+openclaw_config_set() {
+  openclaw_run config set "$@"
+}
+# `gateway.mode` is the one key the gateway refuses to start without: an
+# existing config that lacks it is treated as clobbered ("Gateway start
+# blocked"), and the alternative — passing `--allow-unconfigured` — would
+# silence that check rather than satisfy it. `local` is what this deployment is:
+# one gateway, on this VM, reached only through the loopback bind below.
+openclaw_config_set gateway.mode local
+openclaw_config_set gateway.bind loopback
+openclaw_config_set gateway.port 3334
+# Trusted-proxy auth, NOT token auth. GBrain's own control adapter and every
+# Member's browser reach this gateway only through Caddy on loopback, and both
+# arrive with identity headers rather than an Authorization header.
+#
+# `requiredHeaders` is a PRESENCE check — OpenClaw never compares the value —
+# so X-GBrain-OpenClaw-Proxy is a routing marker and NOT a shared secret. The
+# real boundary is threefold and lives outside this setting: the gateway binds
+# loopback only, Caddy strips any client-supplied copy of both headers at the
+# edge, and the VM gives Members no shell from which to dial 127.0.0.1 directly.
+# `allowLoopback` is required because that proxy is same-host; without it every
+# request is refused as `trusted_proxy_loopback_source` before headers are read.
+openclaw_config_set gateway.auth.mode trusted-proxy
+openclaw_config_set gateway.auth.trustedProxy.userHeader X-GBrain-OpenClaw-User
+openclaw_config_set gateway.auth.trustedProxy.requiredHeaders '["X-GBrain-OpenClaw-Proxy"]'
+openclaw_config_set gateway.auth.trustedProxy.allowLoopback true
+openclaw_config_set gateway.reload.mode hybrid
+# No web terminal: an operator shell inside the agent identity would be the
+# administration escape hatch the whole tier is defined to withhold.
+openclaw_config_set gateway.terminal.enabled false
+# The Responses API is how native clients reach the shared agent. URL fetching
+# is disabled on both surfaces so a request body cannot make the gateway itself
+# dereference an attacker-chosen URL from inside the VM's network position.
+openclaw_config_set gateway.http.endpoints.responses.enabled true
+openclaw_config_set gateway.http.endpoints.responses.files.allowUrl false
+openclaw_config_set gateway.http.endpoints.responses.images.allowUrl false
+openclaw_config_set gateway.controlUi.basePath /agent
+openclaw_config_set gateway.controlUi.allowedOrigins "[\"https://${GBRAIN_SUBDOMAIN}\"]"
+openclaw_config_set gateway.trustedProxies '["127.0.0.1"]'
+# LOAD-BEARING, and the reason the first agent VM never booted.
+#
+# OpenClaw routes the `openai` provider to the CODEX harness runtime by default
+# whenever the base URL is the official one (openAIProviderUsesCodexRuntimeByDefault
+# in the pinned release). That runtime lives in @openclaw/codex, an official
+# EXTERNAL plugin excluded from the openclaw tarball. Selecting it makes codex a
+# CONFIGURED plugin, so a startup migration tries to npm-install it at boot —
+# and `npm view` needs a cache at $HOME/.npm, which ProtectSystem=strict keeps
+# read-only. The migration fails, the gateway refuses to report ready, and the
+# unit crash-loops forever. Reproduced exactly; the model line below is the
+# whole trigger.
+#
+# Shipping the plugin does NOT fix it: `npm view` runs before any local copy is
+# consulted, so neither baking it into /opt/openclaw/node_modules nor adding it
+# to plugins.load.paths prevents the network call. Both were tried and both
+# failed identically. Widening the sandbox so npm can write would "fix" the boot
+# by doing an unpinned network install on every start, which is exactly what the
+# pinned-runtime contract forbids.
+#
+# So the demand is REMOVED rather than satisfied: isSelectablePluginRuntime() is
+# false for "openclaw", so pinning the provider's runtime stops codex being
+# collected at all. The model set below is unchanged and still works — the
+# gateway reports ready on openai/gpt-5.6-sol with the openai provider loaded.
+openclaw_config_set models.providers.openai.agentRuntime.id openclaw
+# The pilot model set. The wildcard allow-list is what lets an Administrator
+# pick any model from a provider they themselves supplied credentials for,
+# while the primary/fallback pair keeps a working default before they do.
+openclaw_config_set agents.defaults.model.primary openai/gpt-5.6-sol
+openclaw_config_set agents.defaults.model.fallbacks '["anthropic/claude-sonnet-5"]'
+openclaw_config_set agents.defaults.models '{"openai/*":{},"anthropic/*":{},"openrouter/*":{}}'
+# The GBrain provider bridge, plus the BUNDLED admin RPC plugin. admin-http-rpc
+# ships with OpenClaw but is disabled by default, and with it disabled the
+# route is never registered: every GBrain control call would answer 404.
+openclaw_config_set plugins.load.paths '["/usr/local/share/openclaw/gbrain-agent-bridge"]'
+openclaw_config_set plugins.entries.gbrain-agent-bridge.enabled true
+openclaw_config_set plugins.entries.admin-http-rpc.enabled true
+
+systemctl enable --now gbrain-agent.service
+# Both plugin routes register during PLUGIN STARTUP, so a gateway that was
+# already running from an earlier partial run would serve the old, plugin-less
+# route table with every assignment above already on disk. `enable --now` does
+# nothing to a running unit, so the restart is what makes this converge.
+systemctl restart gbrain-agent.service
+
+# The Workspace origin now serves both products: GBrain at the root, and the
+# OpenClaw gateway under TWO prefixes that authenticate differently (#68).
+#
+# /agent        the browser Control UI. Every active Member reaches it with their
+#               ordinary GBrain session; `forward_auth` asks GBrain who they are
+#               and Caddy hands the gateway the answer as trusted-proxy identity.
+# /agent-client the native app and CLI, which cannot present a browser session.
+#               `forward_auth` only asks GBrain whether the shared runtime is
+#               ready; the request itself carries the shared native password,
+#               which the gateway's direct-loopback fallback authenticates.
+#
+# The two `request_header -` lines ARE the authentication boundary, not defence
+# in depth. `gateway.auth.trustedProxy.requiredHeaders` is a PRESENCE check —
+# the pinned build never compares the header value — and `allowLoopback` is on,
+# so anything that reaches 127.0.0.1:3334 with those two headers set gets full
+# trusted-operator scope. Deleting the client's copy before `forward_auth` runs
+# is what stops a Member from naming themselves anyone; recreating exactly one
+# from GBrain's own answer is what makes the identity mean something.
+#
+# The native handler deliberately sets NO proxy identity: one there would
+# authenticate every native caller regardless of the password. `header_up
+# -Authorization` belongs only inside its `forward_auth` block — the readiness
+# gate must not receive the shared password, while the original request still
+# carries it to OpenClaw. Both upstreams strip X-OpenClaw-Scopes so no caller can
+# choose its own scopes, and every forwarded-evidence header, so the gateway sees
+# the Caddy hop as loopback. `Cookie` is stripped with `header_up` rather than an
+# early `request_header`, because `forward_auth` must still receive the GBrain
+# session cookie — only the OpenClaw upstream is stripped.
+#
+# Device authentication stays ENABLED. Because all untrusted forwarded evidence
+# is gone, the gateway may silently pair a fresh Control UI/TUI/native device,
+# and it is that paired device identity — not the password or the proxy header —
+# that grants the full WebSocket scope set. Never set
+# `dangerouslyDisableDeviceAuth` to make a scope problem go away.
+#
+# The gateway matches the FULL pathname against its configured basePath, so the
+# prefix must reach it intact: both routes match with `handle`, never the
+# prefix-stripping `handle_path`, which would deliver `/` and break every
+# control-UI request. The native prefix is instead rewritten onto /agent with
+# `uri replace`, so the gateway still sees the one basePath it is configured
+# with. Both agent handlers precede the root handler, whose matcher-less
+# `handle` would otherwise swallow them.
+#
+# This rewrite replaces the whole file, so every directive the Brain-tier
+# finalizer wrote is reproduced here — an omission would silently regress the
+# root route, and the contract test compares the two heredocs against each
+# other rather than trusting this comment. The render is validated as a
+# temporary file and only then installed, so a bad render leaves the known-good
+# config in place instead of destroying it. Installed at an explicit mode
+# because the caddy service runs unprivileged and must read its own config.
+caddyfile_tmp="$(mktemp)"
+trap 'rm -f "$caddyfile_tmp"' EXIT
+cat >"$caddyfile_tmp" <<EOF
+${GBRAIN_SUBDOMAIN} {
+    encode zstd gzip
+    header -Server
+    @agentBrowser path /agent /agent/*
+    handle @agentBrowser {
+        route {
+            request_header -X-GBrain-OpenClaw-User
+            request_header -X-GBrain-OpenClaw-Proxy
+            forward_auth 127.0.0.1:3131 {
+                uri /api/workspace/v1/agent/authorize
+                copy_headers X-GBrain-OpenClaw-User
+                header_up -Connection
+                header_up -Upgrade
+            }
+            reverse_proxy 127.0.0.1:3334 {
+                header_up X-GBrain-OpenClaw-Proxy "gbrain-browser-v1"
+                header_up -Cookie
+                header_up -X-OpenClaw-Scopes
+                header_up -Forwarded
+                header_up -X-Forwarded-For
+                header_up -X-Forwarded-Host
+                header_up -X-Forwarded-Proto
+                header_up -X-Real-IP
+            }
+        }
+    }
+    @agentNative path /agent-client /agent-client/*
+    handle @agentNative {
+        route {
+            forward_auth 127.0.0.1:3131 {
+                uri /api/workspace/v1/agent/native-ready
+                header_up -Authorization
+                header_up -Connection
+                header_up -Upgrade
+            }
+            uri replace /agent-client /agent
+            reverse_proxy 127.0.0.1:3334 {
+                header_up -Cookie
+                header_up -X-GBrain-OpenClaw-User
+                header_up -X-GBrain-OpenClaw-Proxy
+                header_up -X-OpenClaw-Scopes
+                header_up -Forwarded
+                header_up -X-Forwarded-For
+                header_up -X-Forwarded-Host
+                header_up -X-Forwarded-Proto
+                header_up -X-Real-IP
+            }
+        }
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3131
+    }
+}
+EOF
+caddy validate --config "$caddyfile_tmp" --adapter caddyfile
+install -m 0644 -o root -g root "$caddyfile_tmp" /etc/caddy/Caddyfile
+rm -f "$caddyfile_tmp"
+trap - EXIT
+systemctl reload caddy.service
+
+# Fail closed on a POSITIVE assertion: the gateway must answer with a real HTTP
+# status — 401 from token auth included. Testing for the ABSENCE of curl's "000"
+# transport-failure code would declare success when curl cannot run at all,
+# because `|| true` then leaves gateway_status EMPTY, and empty is also not
+# "000". Requiring a 1xx-5xx code instead makes an unreachable gateway, a
+# missing curl, and a curl killed mid-request all abort.
+gateway_status=000
+for _ in $(seq 1 60); do
+  gateway_status="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3334/agent || true)"
+  if [[ "$gateway_status" =~ ^[1-5][0-9][0-9]$ ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ ! "$gateway_status" =~ ^[1-5][0-9][0-9]$ ]]; then
+  echo "the OpenClaw gateway did not answer on 127.0.0.1:3334 (status '$gateway_status')" >&2
+  agent_diagnostics
+  exit 2
+fi
+if ! systemctl is-active --quiet gbrain-agent.service; then
+  echo "gbrain-agent.service is not active after agent finalization" >&2
+  agent_diagnostics
+  exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Live validation.
+#
+# Everything above is a WRITE. A written key with a misspelled path, a plugin
+# that discovery never found, an SDK subpath that moved between releases, and a
+# route that registered under different auth all leave this script's output
+# looking identical. This block therefore proves the resulting behavior on this
+# VM before declaring finalization complete, and every probe fails closed.
+# ---------------------------------------------------------------------------
+
+# The config the gateway will actually parse. `config validate` is the pinned
+# release's own schema check, so a key this script invented is caught here
+# rather than as a silently ignored setting.
+if ! openclaw_run config validate >/dev/null; then
+  echo "the OpenClaw configuration written by agent finalization is not valid" >&2
+  agent_diagnostics
+  exit 2
+fi
+
+# The SDK subpath the bridge imports. A subpath that moved between releases is
+# a plugin that throws at load, which the gateway reports as a plugin error and
+# still serves every other route from — so it must be proven directly.
+if ! (cd /opt/openclaw/node_modules/openclaw \
+  && sudo -u openclaw /opt/node-v24.15.0/bin/node --input-type=module -e \
+    "const sdk = await import('openclaw/plugin-sdk/provider-auth'); if (!sdk.validateAnthropicSetupToken || !sdk.upsertAuthProfileWithLock || !sdk.resolveOpenClawAgentDir) process.exit(1)"); then
+  echo "openclaw/plugin-sdk/provider-auth does not export the functions the GBrain bridge imports" >&2
+  exit 2
+fi
+
+# The bridge through the pinned plugin LOADER, not a source grep: `inspect
+# --runtime` performs a module-loaded inspection pass, so a syntax error, a bad
+# import, or a manifest the loader rejects fails here.
+if ! openclaw_run plugins inspect gbrain-agent-bridge --runtime --json >/dev/null; then
+  echo "the GBrain provider bridge does not load in the pinned OpenClaw plugin runtime" >&2
+  agent_diagnostics
+  exit 2
+fi
+enabled_plugins="$(openclaw_run plugins list --enabled || true)"
+for required_plugin in gbrain-agent-bridge admin-http-rpc; do
+  if ! printf '%s' "$enabled_plugins" | grep -Fq "$required_plugin"; then
+    echo "the $required_plugin plugin is not enabled after agent finalization" >&2
+    agent_diagnostics
+    exit 2
+  fi
+done
+
+# The effective configuration, read structurally from the file the gateway
+# parses. This is the fail-closed counterpart to the writes above: it asserts
+# values AND absences, and a missing file, unreadable file, or unparseable JSON
+# all abort rather than passing vacuously.
+openclaw_config_path="$(openclaw_run config file || true)"
+if [[ -z "$openclaw_config_path" ]]; then
+  echo "the OpenClaw CLI did not report an active configuration file" >&2
+  exit 2
+fi
+# `openclaw config file` prints a DISPLAY path, not a filesystem path. When
+# OPENCLAW_HOME is set — and openclaw_run always sets it — the pinned release's
+# resolveHomeDisplayPrefix() substitutes the LITERAL prefix `$OPENCLAW_HOME`,
+# so the CLI answers `$OPENCLAW_HOME/.openclaw/openclaw.json`. Handed to node
+# unexpanded that is a directory named `$OPENCLAW_HOME`, and the probe died
+# with ENOENT on a real VM — reported as "the effective OpenClaw configuration
+# does not match the 2Brain agent contract", which is exactly the wrong
+# diagnosis. Expand it back to the path openclaw_run actually uses.
+openclaw_config_path="${openclaw_config_path//\$OPENCLAW_HOME/$OPENCLAW_AGENT_HOME}"
+# Fail closed, and say WHICH failure this is. Without this check every way of
+# getting the path wrong arrives as a contract mismatch, sending the reader to
+# audit a configuration that was correct all along.
+if [[ ! -f "$openclaw_config_path" ]]; then
+  echo "the OpenClaw configuration file does not exist at '$openclaw_config_path'" >&2
+  exit 2
+fi
+# The `.mjs` suffix is REQUIRED, not tidiness. The probe below is ESM, and Node
+# decides module format from the file extension: a bare `mktemp` name like
+# /tmp/tmp.3hP5VZlFss makes node exit ERR_UNKNOWN_FILE_EXTENSION before running
+# a single line. That failure is indistinguishable here from a real contract
+# violation, so this script reported "the effective OpenClaw configuration does
+# not match the 2Brain agent contract" and exited 2 on a VM whose config was
+# entirely correct — killing every live route probe below it. Observed on a real
+# agent VM; the workspace still reached `running`, because nothing in the
+# readiness gate observes this script's exit code.
+agent_config_probe="$(mktemp --suffix=.mjs)"
+trap 'rm -f "$agent_config_probe"' EXIT
+# mktemp creates the file 0600 root:root and the probe runs as openclaw, so
+# without this the probe fails to open its own script rather than reading config.
+chmod 0644 "$agent_config_probe"
+cat >"$agent_config_probe" <<'PROBE'
+import { readFileSync } from 'node:fs';
+const config = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+const at = path =>
+  path.split('.').reduce((node, key) => (node === null || node === undefined ? undefined : node[key]), config);
+const failures = [];
+const expectValue = (path, expected) => {
+  const actual = at(path);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    failures.push(`${path} is ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}`);
+  }
+};
+expectValue('gateway.mode', 'local');
+expectValue('gateway.bind', 'loopback');
+expectValue('gateway.port', 3334);
+expectValue('gateway.auth.mode', 'trusted-proxy');
+expectValue('gateway.auth.trustedProxy.userHeader', 'X-GBrain-OpenClaw-User');
+expectValue('gateway.auth.trustedProxy.requiredHeaders', ['X-GBrain-OpenClaw-Proxy']);
+expectValue('gateway.auth.trustedProxy.allowLoopback', true);
+expectValue('gateway.trustedProxies', ['127.0.0.1']);
+// Load-bearing, not cosmetic: the auth-generation reload `hybrid` triggers is
+// what restarts the Gateway after a password patch AND disconnects already
+// established native WebSocket clients. Silently reverted, a password rotation
+// or a disabled Member would report success while old native clients stayed
+// connected — a fail-open nothing else on this VM would notice.
+expectValue('gateway.reload.mode', 'hybrid');
+expectValue('gateway.controlUi.basePath', '/agent');
+expectValue('gateway.terminal.enabled', false);
+expectValue('gateway.http.endpoints.responses.enabled', true);
+expectValue('gateway.http.endpoints.responses.files.allowUrl', false);
+expectValue('gateway.http.endpoints.responses.images.allowUrl', false);
+// Reverting this to "auto"/"codex" — or deleting it — selects the Codex
+// harness runtime, which demands an external plugin the image does not ship
+// and cannot install under a read-only $HOME. That is a permanent crash-loop,
+// not a degraded mode, so the effective value is asserted rather than assumed.
+expectValue('models.providers.openai.agentRuntime.id', 'openclaw');
+expectValue('agents.defaults.model.primary', 'openai/gpt-5.6-sol');
+expectValue('agents.defaults.model.fallbacks', ['anthropic/claude-sonnet-5']);
+expectValue('agents.defaults.models', { 'openai/*': {}, 'anthropic/*': {}, 'openrouter/*': {} });
+expectValue('plugins.load.paths', ['/usr/local/share/openclaw/gbrain-agent-bridge']);
+expectValue('plugins.entries.gbrain-agent-bridge.enabled', true);
+expectValue('plugins.entries.admin-http-rpc.enabled', true);
+// The one key whose value is per-workspace, so it is asserted by SHAPE rather
+// than against a literal: exactly one exact https origin, never a wildcard.
+const allowedOrigins = at('gateway.controlUi.allowedOrigins');
+if (
+  !Array.isArray(allowedOrigins)
+  || allowedOrigins.length !== 1
+  || typeof allowedOrigins[0] !== 'string'
+  || !/^https:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/.test(allowedOrigins[0])
+) {
+  failures.push(
+    `gateway.controlUi.allowedOrigins must be one exact https origin, got ${JSON.stringify(allowedOrigins)}`,
+  );
+}
+// Absences. `undefined` or an explicit `false` is the only acceptable state for
+// each: a shared secret would make the gateway reachable without the proxy, and
+// each `dangerously*`/insecure key disables a check rather than satisfying it.
+for (const path of [
+  'gateway.auth.token',
+  'gateway.auth.password',
+  'gateway.controlUi.dangerouslyDisableDeviceAuth',
+  'gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback',
+  'gateway.controlUi.allowInsecureAuth',
+]) {
+  const actual = at(path);
+  if (actual !== undefined && actual !== false) failures.push(`${path} must not be configured`);
+}
+// The tool policy must stay able to project bundle-mcp, which is how GBrain's
+// own MCP tools reach the agent. `minimal` and any unrecognized profile fail
+// closed upstream, and an allow-list narrows the projection just as a deny does.
+//
+// NOT a live probe of the projected tool, and it cannot be one HERE. The
+// projection needs three things that do not exist at image-finalize time: a
+// configured GBrain MCP server (written at runtime by the Task 4/5 control
+// worker), a Workspace tenant, and — for `gbrain__whoami`'s Agent branch — an
+// Agent row with a credential, which only the first Administrator creates. So
+// this VM can prove the POLICY permits projection and nothing more; the
+// end-to-end proof that `gbrain__whoami` really answers belongs to the Task 14
+// real-VM journey verifier, which runs against a Workspace that has an Agent.
+const profile = at('tools.profile');
+if (profile !== undefined && profile !== 'full') {
+  failures.push(`tools.profile is ${JSON.stringify(profile)}; it must be unset or "full"`);
+}
+if (at('tools.allow') !== undefined) failures.push('tools.allow must not narrow projected MCP tools');
+// ALLOW-shaped, not deny-shaped. Rejecting entries that NAME the GBrain tools
+// leaves every matcher syntax wide open: `["*"]`, `["mcp__*"]`, and a regex-ish
+// entry all hide the projection while naming nothing. So every deny entry must
+// be an exact tool id or an exact `group:` id, and anything else — a wildcard,
+// a glob character, a path, a case variant — is refused on sight.
+const EXACT_TOOL_ID = /^(?:group:)?[a-z0-9_-]+$/;
+const deny = at('tools.deny') ?? [];
+if (!Array.isArray(deny)) failures.push('tools.deny must be a list');
+else {
+  for (const entry of deny) {
+    if (typeof entry !== 'string' || !EXACT_TOOL_ID.test(entry)) {
+      failures.push(
+        `tools.deny entry ${JSON.stringify(entry)} is not an exact tool id; a matcher can hide the projected GBrain MCP tools`,
+      );
+    } else if (/bundle-mcp|gbrain/.test(entry)) {
+      failures.push(`tools.deny entry ${JSON.stringify(entry)} hides the projected GBrain MCP tools`);
+    }
+  }
+}
+for (const failure of failures) process.stderr.write(`- ${failure}\n`);
+if (failures.length > 0) process.exit(1);
+PROBE
+if ! sudo -u openclaw /opt/node-v24.15.0/bin/node "$agent_config_probe" "$openclaw_config_path"; then
+  echo "the effective OpenClaw configuration does not match the 2Brain agent contract" >&2
+  exit 2
+fi
+rm -f "$agent_config_probe"
+trap - EXIT
+
+# The route itself, end to end. An unsupported provider is the cheapest request
+# that reaches the handler, and only a fully working chain answers it: the
+# gateway is listening, trusted-proxy auth accepted a loopback caller carrying
+# the two identity headers, the bridge plugin loaded, and its route registered
+# at the exact path GBrain posts to. A 404 is the disabled-plugin failure and a
+# 401/403 is the auth failure, and both abort here rather than on first use.
+bridge_status="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST http://127.0.0.1:3334/api/v1/gbrain/provider \
+  -H 'Content-Type: application/json' \
+  -H 'X-GBrain-OpenClaw-Proxy: caddy' \
+  -H 'X-GBrain-OpenClaw-User: gbrain-agent-finalize' \
+  --data '{"provider":"unsupported-probe","credential":"probe"}' || true)"
+if [[ "$bridge_status" != "400" ]]; then
+  echo "the GBrain provider bridge route did not answer on 127.0.0.1:3334 (status '$bridge_status')" >&2
+  agent_diagnostics
+  exit 2
+fi
+
+# The same request WITHOUT the identity headers must be refused. Without this,
+# an auth mode of `none` would satisfy the probe above perfectly.
+unauthenticated_status="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST http://127.0.0.1:3334/api/v1/gbrain/provider \
+  -H 'Content-Type: application/json' \
+  --data '{"provider":"unsupported-probe","credential":"probe"}' || true)"
+if [[ ! "$unauthenticated_status" =~ ^(401|403)$ ]]; then
+  echo "the OpenClaw gateway did not refuse an unauthenticated bridge call (status '$unauthenticated_status')" >&2
+  agent_diagnostics
+  exit 2
+fi
+
+# The bundled admin RPC route, which GBrain's adapter uses for everything the
+# bridge deliberately does not expose. Its 404 is the exact defect this
+# finalization exists to fix, so a 404 here is fatal.
+admin_rpc_status="$(curl -s -o /dev/null -w '%{http_code}' \
+  -X POST http://127.0.0.1:3334/api/v1/admin/rpc \
+  -H 'Content-Type: application/json' \
+  -H 'X-GBrain-OpenClaw-Proxy: caddy' \
+  -H 'X-GBrain-OpenClaw-User: gbrain-agent-finalize' \
+  --data '{}' || true)"
+if [[ ! "$admin_rpc_status" =~ ^[1-5][0-9][0-9]$ ]] || [[ "$admin_rpc_status" == "404" ]]; then
+  echo "the bundled admin-http-rpc route is not registered (status '$admin_rpc_status')" >&2
+  agent_diagnostics
+  exit 2
+fi
+
+# The route GBrain's own readiness gate lives on, named here so an operator
+# reading a failed boot knows which URL the control plane is waiting on. It is
+# GBrain's, not the gateway's, and it is deliberately NOT probed from this
+# script: it answers only once the Workspace's own agent binding exists, which
+# the first Administrator creates long after cloud-init has finished.
+echo "2Brain control-plane readiness gate: https://${GBRAIN_SUBDOMAIN}/api/workspace/v1/agent/runtime-health"
+echo "2Brain agent runtime enabled behind https://${GBRAIN_SUBDOMAIN}/agent (native clients: /agent-client)"

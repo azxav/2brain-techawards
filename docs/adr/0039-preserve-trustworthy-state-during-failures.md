@@ -1,0 +1,3 @@
+# Preserve the last trustworthy state during recoverable failures
+
+When a request fails, 2Brain keeps the most recent successfully loaded state visible and persistently marks it as potentially outdated near the affected content. Recovery preserves filters and unsaved form input, offers a safe retry, and identifies the failure time, affected resource, recommended action, and copyable request ID. Failed Background Operations create Attention Items. Raw stack traces and sensitive diagnostics remain restricted to authorized Administrator logs; disappearing toast messages never carry the only failure explanation.

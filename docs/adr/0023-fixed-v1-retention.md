@@ -1,0 +1,3 @@
+# Apply fixed retention defaults in v1
+
+2Brain retains Page Versions for Sources that have not been permanently deleted, redacted Source lifecycle records, access-policy changes, and Attention outcomes until Workspace deletion; Structured Agent Activity and Change Events for 90 days; and Ask Results, Background Operation detail, and Notifications for 30 days. Permanently deleting an Archived Source may purge its content and Page Versions but never its immutable Audit Events. Full request parameters remain disabled by default and, if explicitly enabled, are purged after 7 days; custom retention periods are deferred.

@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV_FILE="${GBRAIN_ENV_FILE:-/etc/gbrain/workspace.env}"
+VALIDATE_ONLY=false
+if [[ "${1:-}" == "--validate-only" ]]; then
+  VALIDATE_ONLY=true
+elif [[ -n "${1:-}" ]]; then
+  echo "usage: gbrain-cloud-init-finalize [--validate-only]" >&2
+  exit 2
+fi
+
+if ! $VALIDATE_ONLY && [[ "$(id -u)" -ne 0 ]]; then
+  echo "gbrain-cloud-init-finalize must run as root" >&2
+  exit 2
+fi
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "missing cloud-init environment: $ENV_FILE" >&2
+  exit 2
+fi
+env_mode="$(stat -c '%a' "$ENV_FILE")"
+if [[ "$env_mode" != "600" && "$env_mode" != "640" ]]; then
+  echo "$ENV_FILE must not be readable by unprivileged users" >&2
+  exit 2
+fi
+
+required=(
+  GBRAIN_WORKSPACE_NAME
+  GBRAIN_SUBDOMAIN
+  GBRAIN_WORKSPACE_BASE_URL
+  GBRAIN_WORKSPACE_TOKEN_SECRET
+  GBRAIN_BOOTSTRAP_CREDENTIAL
+  GBRAIN_EMAIL_RESEND_API_KEY
+  GBRAIN_EMAIL_FROM
+  OPENROUTER_API_KEY
+  GBRAIN_EMBEDDING_MODEL
+  GBRAIN_EMBEDDING_DIMENSIONS
+  GBRAIN_DATABASE_URL
+  TWO_BRAIN_DATABASE_URL
+)
+optional=(
+  GBRAIN_WORKSPACE_PRODUCTION
+  OPENROUTER_REFERER
+  OPENROUTER_TITLE
+  # Agent tier tells the VM what it is (#58). Brain-tier cloud-init never emits
+  # it, so it stays optional; this file only has to ACCEPT it. Nothing here acts
+  # on the value — the agent runtime is switched on by gbrain-agent-finalize.
+  GBRAIN_AGENT_TIER
+)
+
+# Parse the systemd EnvironmentFile subset without sourcing it. Workspace name
+# and email values are operator-controlled launch data; evaluating the file as
+# shell would let command substitutions run as root before validation.
+parsed_env="$(python3 - "$ENV_FILE" "${required[@]}" "${optional[@]}" <<'PY'
+import base64
+import re
+import shlex
+import sys
+
+path = sys.argv[1]
+allowed = set(sys.argv[2:])
+values = {}
+with open(path, encoding="utf-8") as handle:
+    for line_number, raw_line in enumerate(handle, start=1):
+        line = raw_line.rstrip("\n")
+        if not line or line.lstrip().startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(.*)", line)
+        if not match:
+            raise SystemExit(f"invalid environment syntax on line {line_number}")
+        key, raw_value = match.groups()
+        if key not in allowed:
+            raise SystemExit(f"unknown cloud-init environment key: {key}")
+        if key in values:
+            raise SystemExit(f"duplicate cloud-init environment key: {key}")
+        parts = shlex.split(raw_value, comments=False, posix=True)
+        if len(parts) != 1:
+            raise SystemExit(f"environment value must be one quoted or unquoted field: {key}")
+        value = parts[0]
+        if any(character in value for character in ("\x00", "\r", "\n")):
+            raise SystemExit(f"environment value contains a control character: {key}")
+        values[key] = value
+for key, value in values.items():
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    print(f"{key}\t{encoded}")
+PY
+)" || exit 2
+
+while IFS=$'\t' read -r name encoded; do
+  [[ -n "$name" ]] || continue
+  value="$(printf '%s' "$encoded" | base64 --decode)"
+  printf -v "$name" '%s' "$value"
+  export "$name"
+done <<<"$parsed_env"
+
+for name in "${required[@]}"; do
+  if [[ -z "${!name:-}" || "${!name}" == *REPLACE_* ]]; then
+    echo "cloud-init value is missing or still a placeholder: $name" >&2
+    exit 2
+  fi
+done
+
+if [[ ! "$GBRAIN_SUBDOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+  echo "GBRAIN_SUBDOMAIN is not a valid lowercase DNS name" >&2
+  exit 2
+fi
+if [[ "$GBRAIN_WORKSPACE_BASE_URL" != "https://$GBRAIN_SUBDOMAIN" ]]; then
+  echo "GBRAIN_WORKSPACE_BASE_URL must equal https://GBRAIN_SUBDOMAIN" >&2
+  exit 2
+fi
+if [[ "$GBRAIN_DATABASE_URL" != "$TWO_BRAIN_DATABASE_URL" ]]; then
+  echo "GBRAIN_DATABASE_URL and TWO_BRAIN_DATABASE_URL must target the same local database" >&2
+  exit 2
+fi
+if [[ "$GBRAIN_EMBEDDING_DIMENSIONS" != "1536" ]]; then
+  echo "the baked pgvector schema contract requires GBRAIN_EMBEDDING_DIMENSIONS=1536" >&2
+  exit 2
+fi
+
+mapfile -t db_parts < <(python3 - "$GBRAIN_DATABASE_URL" <<'PY'
+import sys
+from urllib.parse import unquote, urlparse
+
+parsed = urlparse(sys.argv[1])
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit("database URL must use postgres:// or postgresql://")
+if parsed.hostname not in {"127.0.0.1", "localhost"}:
+    raise SystemExit("database URL must target local Postgres")
+if (parsed.port or 5432) != 5432:
+    raise SystemExit("database URL must target local Postgres port 5432")
+name = parsed.path.removeprefix("/")
+user = unquote(parsed.username or "")
+password = unquote(parsed.password or "")
+if not name or not user or not password:
+    raise SystemExit("database URL must include database, user, and password")
+for value in (name, user):
+    if not value.replace("_", "a").isalnum() or not (value[0].isalpha() or value[0] == "_"):
+        raise SystemExit("database and role names must be simple SQL identifiers")
+print(user)
+print(password)
+print(name)
+PY
+)
+if [[ "${#db_parts[@]}" -ne 3 ]]; then
+  echo "could not parse local Postgres URL" >&2
+  exit 2
+fi
+DB_USER="${db_parts[0]}"
+DB_PASSWORD="${db_parts[1]}"
+DB_NAME="${db_parts[2]}"
+
+if $VALIDATE_ONLY; then
+  echo "2Brain cloud-init contract: OK"
+  exit 0
+fi
+
+install -d -m 0750 -o root -g gbrain /etc/gbrain
+install -d -m 0700 -o gbrain -g gbrain /var/lib/gbrain /var/lib/gbrain/.gbrain
+chown root:gbrain "$ENV_FILE"
+chmod 0640 "$ENV_FILE"
+
+# The pinned OpenClaw runtime is baked into the common image but belongs to the
+# agent tier (#57). Brain-tier finalization must PROVE it inert and walled off
+# from Platform Credentials BEFORE any service holds live secrets, and must
+# never read, create, or require the agent-scoped environment file under
+# /etc/openclaw that the unit conditions on — naming it here at all would let a
+# Brain-tier VM satisfy that condition. Every check below is fatal: this is the
+# only point where the static bundle contract meets a real VM.
+#
+# This block must stay AFTER "$ENV_FILE" reaches its final root:gbrain 0640
+# ownership and mode above — the readability proof below is a statement about
+# those final permissions — and BEFORE any service starts, because a proof that
+# runs once PostgreSQL holds live credentials proves the wrong window.
+#
+# EDITING THIS BLOCK: verify-contract.ts pins the SPAN, not just the strings.
+# Everything from `chmod 0640 "$ENV_FILE"` above through
+# `systemctl enable --now postgresql.service` below must stay one contiguous,
+# visible, top-level sequence, and `cloud/test/image-contract.test.ts` proves
+# the verifier refuses it otherwise. Inside those two anchors, every line must
+# be a comment, a blank line, a check the verifier's proof table names, or one
+# of the structural lines it authorizes: `echo "…" >&2`, `exit 2`, `fi`, `}`
+# (plus the two anchors themselves).
+# Adding a conditional wrapper, a function, a heredoc, or any other statement
+# here fails the image check even when it looks harmless — that is the point,
+# because each of those keeps every pinned character while running none of it.
+# A genuinely new check belongs in BRAIN_TIER_AGENT_PROOFS first; agent-tier
+# ENABLEMENT belongs in #57 and never here.
+systemctl disable --now gbrain-agent.service
+agent_enabled_state="$(systemctl is-enabled gbrain-agent.service 2>/dev/null || true)"
+if [[ "$agent_enabled_state" != "disabled" ]]; then
+  echo "gbrain-agent.service must remain disabled for Brain-tier cloud-init" >&2
+  exit 2
+fi
+if systemctl is-active --quiet gbrain-agent.service; then
+  echo "gbrain-agent.service must remain inactive for Brain-tier cloud-init" >&2
+  exit 2
+fi
+
+# Exact group set, not a gbrain-only denial: any extra group is another path to
+# authority the agent must not have. Captured into a variable rather than piped
+# into `grep -q`, whose early exit can hand `set -o pipefail` a SIGPIPE status
+# and turn a positive match into a silently skipped check.
+openclaw_groups="$(id -nG openclaw)"
+if [[ "$openclaw_groups" != "openclaw" ]]; then
+  echo "openclaw must belong only to the openclaw group" >&2
+  exit 2
+fi
+# Positive control. `sudo -u openclaw test -r` returns nonzero both when the
+# file is unreadable and when sudo itself cannot run, so the proof below would
+# pass vacuously on a broken sudo. This line makes that failure loud and local
+# instead of relying on the unrelated `sudo -u postgres` call further down.
+sudo -u openclaw true
+if sudo -u openclaw test -r "$ENV_FILE"; then
+  echo "openclaw must not read the GBrain Workspace environment" >&2
+  exit 2
+fi
+
+# The mount target is spelled literally so the proof cannot be repointed at a
+# different filesystem. Under `set -euo pipefail` a failing substitution aborts
+# the script before the comparison is reached, so the explicit diagnostics below
+# are what turn a bare exit 1 into a reason. FSTYPE and OPTIONS need none: they
+# query the same target as SOURCE and cannot fail once it has succeeded.
+openclaw_source="$(findmnt -n -o SOURCE --target /var/lib/openclaw)" || {
+  echo "OpenClaw storage is not mounted at /var/lib/openclaw" >&2
+  exit 2
+}
+openclaw_fstype="$(findmnt -n -o FSTYPE --target /var/lib/openclaw)"
+openclaw_options="$(findmnt -n -o OPTIONS --target /var/lib/openclaw)"
+openclaw_size="$(blockdev --getsize64 "$openclaw_source")" || {
+  echo "OpenClaw storage is not backed by a sizable block device" >&2
+  exit 2
+}
+if [[ "$openclaw_fstype" != "ext4" ]] \
+  || [[ "$openclaw_size" -ne 10737418240 ]] \
+  || [[ ",$openclaw_options," != *,nodev,* ]] \
+  || [[ ",$openclaw_options," != *,nosuid,* ]]; then
+  echo "OpenClaw storage does not match the bounded image contract" >&2
+  exit 2
+fi
+# Bare, unguarded, and without `2>/dev/null`: `-C` exits nonzero when the rule
+# is absent and `set -e` then aborts cloud-init with iptables' own diagnostic,
+# so a missing loopback-PostgreSQL denial can never be finalized away.
+iptables -C OUTPUT -m owner --uid-owner openclaw -p tcp --dport 5432 -d 127.0.0.0/8 -j REJECT
+ip6tables -C OUTPUT -m owner --uid-owner openclaw -p tcp --dport 5432 -d ::1/128 -j REJECT
+
+systemctl enable --now postgresql.service
+sudo -u postgres psql --set=ON_ERROR_STOP=1 \
+  --set=db_user="$DB_USER" --set=db_password="$DB_PASSWORD" --set=db_name="$DB_NAME" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_password')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user') \gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_password') \gexec
+SELECT format('CREATE DATABASE %I OWNER %I', :'db_name', :'db_user')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name') \gexec
+SELECT format('ALTER DATABASE %I OWNER TO %I', :'db_name', :'db_user') \gexec
+SQL
+sudo -u postgres psql --set=ON_ERROR_STOP=1 --dbname "$DB_NAME" \
+  --command 'CREATE EXTENSION IF NOT EXISTS vector'
+
+# Workspace foundation must be initialized before the core schema, and some
+# core migrations create RLS policies and event triggers. Run the existing
+# one-shot worker path—which preserves that ordering—as the application role
+# so every object remains application-owned. Elevation is bounded to this
+# command and revoked on every exit path before long-running services start.
+revoke_migration_privileges() {
+  sudo -u postgres psql --set=ON_ERROR_STOP=1 --set=db_user="$DB_USER" <<'SQL'
+SELECT format('ALTER ROLE %I NOSUPERUSER NOBYPASSRLS', :'db_user') \gexec
+SQL
+}
+revoke_migration_privileges_best_effort() {
+  revoke_migration_privileges >/dev/null 2>&1 || true
+}
+trap revoke_migration_privileges_best_effort EXIT
+sudo -u postgres psql --set=ON_ERROR_STOP=1 --set=db_user="$DB_USER" <<'SQL'
+SELECT format('ALTER ROLE %I SUPERUSER BYPASSRLS', :'db_user') \gexec
+SQL
+systemd-run --quiet --wait --pipe --collect \
+  --unit=gbrain-cloud-init-migrate \
+  --property=User=gbrain \
+  --property=Group=gbrain \
+  --property=EnvironmentFile="$ENV_FILE" \
+  --setenv=HOME=/var/lib/gbrain \
+  --setenv=GBRAIN_HOME=/var/lib/gbrain \
+  /usr/local/bin/gbrain workspace-runtime worker --once
+revoke_migration_privileges
+trap - EXIT
+
+cat >/etc/caddy/Caddyfile <<EOF
+${GBRAIN_SUBDOMAIN} {
+    encode zstd gzip
+    header -Server
+    reverse_proxy 127.0.0.1:3131
+}
+EOF
+caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+systemctl daemon-reload
+systemctl enable --now gbrain-worker.service
+systemctl enable --now gbrain-scheduler.service
+systemctl enable --now gbrain-web.service
+
+for _ in $(seq 1 60); do
+  if curl --fail --silent --show-error http://127.0.0.1:3131/health >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+curl --fail --silent --show-error http://127.0.0.1:3131/health >/dev/null
+systemctl enable --now caddy.service
+systemctl is-active --quiet \
+  postgresql.service \
+  gbrain-worker.service \
+  gbrain-scheduler.service \
+  gbrain-web.service \
+  caddy.service
+
+install -m 0600 -o root -g root /dev/null /var/lib/gbrain/cloud-init-complete
+printf '%s\n' "workspace=$GBRAIN_WORKSPACE_NAME" "origin=$GBRAIN_WORKSPACE_BASE_URL" \
+  > /var/lib/gbrain/cloud-init-complete
+echo "2Brain workspace services configured for $GBRAIN_WORKSPACE_BASE_URL"

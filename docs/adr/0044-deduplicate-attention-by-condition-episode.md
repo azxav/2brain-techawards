@@ -1,0 +1,3 @@
+# Deduplicate Attention Items by Condition Episode
+
+2Brain maintains at most one active Attention Item for a condition type and affected resource during one uninterrupted Condition Episode. A Source-specific synchronization or verification failure is categorized as Source health; Automation health is reserved for stalled or failed orchestration not owned by one Source, preventing duplicate items for the same failure. Resolved ends the episode after system verification. Dismissed suppresses regeneration while the same condition persists; if the condition clears and later returns, a new episode may create a new item.

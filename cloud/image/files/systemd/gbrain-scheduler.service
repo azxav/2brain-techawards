@@ -1,0 +1,32 @@
+[Unit]
+Description=2Brain Workspace always-on scheduler
+Wants=network-online.target
+After=network-online.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=gbrain
+Group=gbrain
+WorkingDirectory=/opt/gbrain
+Environment=HOME=/var/lib/gbrain
+Environment=GBRAIN_HOME=/var/lib/gbrain
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/gbrain/workspace.env
+ExecStart=/usr/local/bin/gbrain workspace-runtime scheduler
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+StateDirectory=gbrain
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+# Shell scripts execute under Linux in CI and WSL; keep their shebangs and syntax LF-terminated.
+*.sh text eol=lf
+# Same reason, for the extensionless scripts a `*.sh` glob cannot reach. Every
+# bin/ under cloud/ holds shell that runs on a Linux box: the deploy validator and
+# the image's cloud-init finalizer alike.
+cloud/**/bin/* text eol=lf
+# systemd units ship byte-exact and the image-contract tests match whole lines.
+# Under a CRLF checkout those exact-line assertions would silently stop matching.
+cloud/image/files/systemd/*.service text eol=lf
+# check-test-isolation.sh:67-69 matches allowlist entries with a whole-line
+# bash `case`, not a trimming parser. A CRLF checkout puts `\r` on every
+# entry so none of them match, and ~69 already-baselined violations reappear.
+scripts/check-test-isolation.allowlist text eol=lf
+# import-from-upstream.sh reads this table tab-delimited; `__RENAME__` rows
+# have no trailing comment field, so a CRLF checkout appends `\r` straight
+# onto the `to_path` field and renames land on a garbage filename.
+scripts/upstream-scrub-table.txt text eol=lf

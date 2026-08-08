@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(id -u)" -ne 0 || "$#" -ne 1 ]]; then
+  echo "usage: sudo gbrain-update /path/to/new-gbrain-binary" >&2
+  exit 2
+fi
+
+candidate="$1"
+target=/usr/local/bin/gbrain
+state_dir=/usr/local/lib/gbrain-update
+lock_file=/run/lock/gbrain-update.lock
+services=(gbrain-web.service gbrain-worker.service gbrain-scheduler.service)
+
+if [[ ! -f "$candidate" ]]; then
+  echo "candidate binary not found: $candidate" >&2
+  exit 2
+fi
+
+install -d -m 0755 "$state_dir"
+exec 9>"$lock_file"
+if ! flock -n 9; then
+  echo "another gbrain update is already running" >&2
+  exit 1
+fi
+
+install -m 0755 "$candidate" "$state_dir/candidate"
+candidate_version="$($state_dir/candidate --version)"
+if [[ -z "$candidate_version" ]]; then
+  echo "candidate did not report a version" >&2
+  exit 1
+fi
+
+cp -a "$target" "$state_dir/gbrain.previous"
+install -m 0755 "$state_dir/candidate" "$target.new"
+mv -f "$target.new" "$target"
+
+rollback() {
+  trap - ERR
+  echo "new gbrain failed health verification; restoring previous binary" >&2
+  install -m 0755 "$state_dir/gbrain.previous" "$target"
+  systemctl restart "${services[@]}"
+}
+trap rollback ERR
+
+systemctl restart "${services[@]}"
+for _ in $(seq 1 60); do
+  if systemctl is-active --quiet "${services[@]}" \
+    && curl --fail --silent --show-error http://127.0.0.1:3131/health >/dev/null; then
+    trap - ERR
+    echo "gbrain updated successfully: $candidate_version"
+    exit 0
+  fi
+  sleep 1
+done
+
+false

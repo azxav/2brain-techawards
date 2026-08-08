@@ -1,0 +1,10 @@
+{
+  "id": "gbrain-agent-bridge",
+  "name": "2Brain Agent provider bridge",
+  "version": "1.0.0",
+  "description": "Imports supported pilot provider credentials from GBrain loopback control.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {}
+}

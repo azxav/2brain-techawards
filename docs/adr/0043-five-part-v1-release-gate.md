@@ -1,0 +1,3 @@
+# Require five independent gates for the v1 release
+
+2Brain v1 is ready only when five gates pass: every approved Member and Administrator flow works end to end; provenance, freshness, Attention verification, Agent activity, Search, and Ask use live data only; server-side role and Source Access tests pass and secrets are absent from exports, logs, and browser payloads; the Notion Design Evidence matrix, WCAG 2.2 AA checks, responsive states, and performance budgets pass; and clean setup, Background Operation recovery, retention, immutable administrative audit, and whole-release rollback are verified. Passing some gates does not compensate for failing another.

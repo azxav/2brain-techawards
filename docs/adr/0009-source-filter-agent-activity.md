@@ -1,0 +1,3 @@
+# Filter Agent activity through Source authorization
+
+Every Member may see the Workspace's Agent Directory, but detailed Agent Activity is filtered through that Member's Source Access. As an explicit administrative-oversight exception, Administrators may inspect the complete structured history even outside their personal Source Access; this does not grant ordinary Knowledge browsing, and raw prompts remain excluded by default. Basic Agent visibility supports organizational coordination, while exposing unrestricted request content or Pages to ordinary Members would create a cross-Source information leak, so backend authorization remains authoritative regardless of what the UI hides.

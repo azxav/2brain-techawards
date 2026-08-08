@@ -1,0 +1,174 @@
+{
+  "environment": {
+    "browser": "msedge.exe",
+    "database": "postgres",
+    "http_boundary": "http://127.0.0.1:61339",
+    "worker": "always-on",
+    "desktop_viewport": "1440x900",
+    "mobile_viewport": "390x844 dark reduced-motion"
+  },
+  "checks": {
+    "first_administrator_setup": "pass",
+    "production_http_auth_boundary": "pass",
+    "member_invitation": "pass",
+    "member_login": "pass",
+    "source_onboarding_worker": "pass",
+    "always_on_worker": "pass",
+    "zero_source_access_explanation": "pass",
+    "current_and_future_source_access": "pass",
+    "knowledge_and_page_inspection": "pass",
+    "deterministic_search": "pass",
+    "ask_answer_and_citation": "pass",
+    "ask_refusal_on_unsupported_claim": "pass",
+    "attention_and_notifications": "pass",
+    "agent_registration_and_directory": "pass",
+    "export_completion": "pass",
+    "role_alone_grants_no_source_access": "pass",
+    "administrator_source_access_grant": "pass",
+    "archive_and_deletion": "pass",
+    "system_light_and_dark": "pass",
+    "tablet_layout": "pass",
+    "mobile_dark_reduced_motion": "pass",
+    "keyboard_escape": "pass",
+    "console_health": "pass"
+  },
+  "timings_ms": {
+    "authenticated_shell": 171,
+    "knowledge_list_p95": 60,
+    "knowledge_list_samples": [
+      55,
+      53,
+      47,
+      42,
+      63,
+      51,
+      60,
+      51,
+      48,
+      52,
+      44,
+      48,
+      53,
+      50,
+      47,
+      56,
+      56,
+      48,
+      52,
+      51
+    ],
+    "search_p95": 52,
+    "search_samples": [
+      48,
+      45,
+      47,
+      40,
+      43,
+      53,
+      47,
+      48,
+      47,
+      52,
+      46,
+      48,
+      46,
+      47,
+      47,
+      51,
+      50,
+      49,
+      44,
+      49
+    ],
+    "search_network_p95": 49,
+    "search_network_samples": [
+      45,
+      42,
+      44,
+      37,
+      40,
+      50,
+      44,
+      46,
+      44,
+      49,
+      43,
+      46,
+      43,
+      44,
+      42,
+      47,
+      46,
+      46,
+      42,
+      46
+    ],
+    "ask_acknowledgement": 161
+  },
+  "accessibility": [
+    {
+      "route": "/app desktop",
+      "violations": []
+    },
+    {
+      "route": "/app member access-required",
+      "violations": []
+    },
+    {
+      "route": "/app/knowledge page detail",
+      "violations": []
+    },
+    {
+      "route": "/app/search results",
+      "violations": []
+    },
+    {
+      "route": "/app/ask answered",
+      "violations": []
+    },
+    {
+      "route": "/app/ask refused",
+      "violations": []
+    },
+    {
+      "route": "/app/attention assigned",
+      "violations": []
+    },
+    {
+      "route": "/app/agents registered",
+      "violations": []
+    },
+    {
+      "route": "/app/settings/export completed",
+      "violations": []
+    },
+    {
+      "route": "/app desktop system",
+      "violations": []
+    },
+    {
+      "route": "/app desktop light",
+      "violations": []
+    },
+    {
+      "route": "/app desktop dark",
+      "violations": []
+    },
+    {
+      "route": "/app/knowledge tablet 768x1024",
+      "violations": []
+    },
+    {
+      "route": "/app/notifications mobile dark reduced-motion",
+      "violations": []
+    }
+  ],
+  "console_errors": [],
+  "screenshots": [
+    "docs/verification/browser/admin-home-1440x900.png",
+    "docs/verification/browser/member-ask-answer-1440x900.png",
+    "docs/verification/browser/member-ask-refusal-1440x900.png",
+    "docs/verification/browser/member-knowledge-tablet-768x1024.png",
+    "docs/verification/browser/member-notifications-dark-mobile-390x844.png"
+  ]
+}

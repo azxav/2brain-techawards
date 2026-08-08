@@ -1,0 +1,26 @@
+{
+  "release": "2Brain Agent customer pilot",
+  "generated_at": "2026-07-29T00:00:00.000Z",
+  "vm_started_at": "2026-07-29T00:00:00.000Z",
+  "subject_commit_sha": "0000000000000000000000000000000000000000",
+  "openclaw_version": "2026.7.1-2",
+  "issues": {
+    "61": { "state": "closed", "checked_at": "2026-07-29T00:00:00.000Z" },
+    "68": { "state": "closed", "checked_at": "2026-07-29T00:00:00.000Z" }
+  },
+  "evidence": {
+    "subject_commit_sha": "0000000000000000000000000000000000000000",
+    "artifacts": {
+      "full_test_run": { "path": "docs/verification/agent-pilot-full-test.md", "status": "pass" },
+      "postgres_parity": { "path": "docs/verification/agent-pilot-postgres.md", "status": "pass" },
+      "browser_native": { "path": "docs/verification/agent-pilot-browser-native.md", "status": "pass" },
+      "provider_models": { "path": "docs/verification/agent-pilot-browser-native.md", "status": "pass" },
+      "approvals": { "path": "docs/verification/agent-pilot-browser-native.md", "status": "pass" },
+      "member_revocation": { "path": "docs/verification/agent-pilot-browser-native.md", "status": "pass" },
+      "export_redaction": { "path": "docs/verification/agent-pilot-browser-native.md", "status": "pass" },
+      "network_isolation": { "path": "docs/verification/agent-pilot-vm-isolation.md", "status": "pass" },
+      "public_loopback_dependencies": { "path": "docs/verification/agent-pilot-vm-isolation.md", "status": "pass" },
+      "vm_updates": { "path": "docs/verification/agent-pilot-vm-isolation.md", "status": "pass" }
+    }
+  }
+}

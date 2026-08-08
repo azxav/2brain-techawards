@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "description": "Embedding provider smoke test — verifies semantic search returns expected results for known brain content. Run after any embedding model change or migration.",
+  "queries": [
+    {
+      "id": "incubator-labs-strategy",
+      "query": "incubator Labs strategy and product team",
+      "relevant": [
+        "originals/incubator-labs-internal-team",
+        "originals/harj-incubator-labs-strategy-2026-05"
+      ]
+    },
+    {
+      "id": "alice-example-tan-person",
+      "query": "Who is 2Brain team",
+      "relevant": [
+        "people/alice-example-tan"
+      ]
+    },
+    {
+      "id": "gstack-project",
+      "query": "GStack open source AI coding framework",
+      "relevant": [
+        "projects/gstack/gstackbrain"
+      ]
+    },
+    {
+      "id": "incubator-carry-compensation",
+      "query": "GP carry and compensation structure at incubator",
+      "relevant": [
+        "originals/harj-incubator-labs-strategy-2026-05"
+      ]
+    },
+    {
+      "id": "meeting-search",
+      "query": "recent office hours meeting notes",
+      "relevant": []
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Nightly 2Brain Cloud registry backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+RandomizedDelaySec=900
+# A VM that was down at 03:00 backs up on next boot rather than skipping the day.
+Persistent=true
+Unit=gbrain-control-plane-backup.service
+
+[Install]
+WantedBy=timers.target

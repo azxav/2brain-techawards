@@ -1,0 +1,260 @@
+#!/usr/bin/env bash
+#
+# Fail-closed check of the control-plane environment *file*, run by install.sh
+# before it installs anything (#46). An env discovered to be incomplete after apt
+# and a git clone leaves a half-built box the next run has to reason about.
+#
+# The file is the only input. The systemd units read it through EnvironmentFile and
+# never see an operator's shell, so a value that happens to be set in this process's
+# environment says nothing about whether those units can boot.
+#
+# Every contract failure exits 2, never 1, so a caller can tell "this env is
+# wrong" apart from "this script broke".
+set -euo pipefail
+
+ENV_FILE="${CP_ENV_FILE:-/etc/gbrain-cp/control-plane.env}"
+
+if [[ -n "${1:-}" ]]; then
+  echo "usage: gbrain-cp-verify-env" >&2
+  exit 2
+fi
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "missing control-plane environment: $ENV_FILE" >&2
+  exit 2
+fi
+env_mode="$(stat -c '%a' "$ENV_FILE")"
+if [[ "$env_mode" != "600" && "$env_mode" != "640" ]]; then
+  echo "$ENV_FILE must not be readable by unprivileged users" >&2
+  exit 2
+fi
+
+# The union of both entrypoints' requirements: install.sh enables the web unit
+# (src/index.ts) and the backup timer (src/backup.ts), so an env that satisfies
+# only one of them still leaves a unit that cannot start.
+required=(
+  CP_DATABASE_URL
+  CP_BASE_URL
+  CP_WORKSPACE_DOMAIN
+  CP_SECRET_KEY
+  CP_GITHUB_CLIENT_ID
+  CP_GITHUB_CLIENT_SECRET
+  CP_CLOUDFLARE_API_TOKEN
+  CP_CLOUDFLARE_ZONE_ID
+  CP_EMAIL_RESEND_API_KEY
+  CP_EMAIL_FROM
+  CP_OPENROUTER_PROVISIONING_KEY
+  CP_BACKUP_BUCKET
+  CP_BACKUP_NAMESPACE
+  OCI_REGION
+  OCI_TENANCY_OCID
+  OCI_USER_OCID
+  OCI_KEY_FINGERPRINT
+  OCI_PRIVATE_KEY_PATH
+  OCI_COMPARTMENT_OCID
+  OCI_AVAILABILITY_DOMAIN
+  OCI_SUBNET_OCID
+  OCI_WORKSPACE_NSG_OCID
+  OCI_WORKSPACE_IMAGE_OCID
+)
+optional=(
+  CP_OPERATOR_GITHUB_IDS
+  CP_PORT
+  CP_COOKIE_SECURE
+  CP_FLEET_CAP
+  CP_RECONCILE_INTERVAL_MS
+  CP_MAX_STEP_ATTEMPTS
+  CP_OPENROUTER_KEY_LIMIT_USD
+  OCI_INSTANCE_SHAPE
+  OCI_INSTANCE_OCPUS
+  OCI_INSTANCE_MEMORY_GB
+  OCI_INSTANCE_BOOT_VOLUME_GB
+)
+
+# Drop any inherited value before a single check reads one. bash pre-populates its
+# shell variables from the environment it inherits, so the checks below would read
+# an operator's ambient CP_*/OCI_* through ${!name} regardless of what this script
+# exports. install.sh runs from an interactive session, and `sudo -E`, a root shell,
+# and CI runners all defeat sudo's env_reset — an ambient value would satisfy a
+# check here and then crash-loop the unit, which is the half-built box this script
+# exists to prevent. Unsetting exactly the two contract arrays cannot drift: they
+# are the same arrays that feed the parser's allow-list. CP_ENV_FILE is in neither,
+# deliberately, so it survives.
+unset "${required[@]}" "${optional[@]}"
+
+# Parse the systemd EnvironmentFile subset without sourcing it. These values are
+# operator-supplied; evaluating the file as shell would let a command
+# substitution run as root before a single check happened.
+parsed_env="$(python3 - "$ENV_FILE" "${required[@]}" "${optional[@]}" <<'PY'
+import base64
+import re
+import shlex
+import sys
+
+path = sys.argv[1]
+allowed = set(sys.argv[2:])
+values = {}
+with open(path, encoding="utf-8") as handle:
+    for line_number, raw_line in enumerate(handle, start=1):
+        line = raw_line.rstrip("\n")
+        if not line or line.lstrip().startswith("#"):
+            continue
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(.*)", line)
+        if not match:
+            raise SystemExit(f"invalid environment syntax on line {line_number}")
+        key, raw_value = match.groups()
+        if key not in allowed:
+            raise SystemExit(f"unknown control-plane environment key: {key}")
+        if key in values:
+            raise SystemExit(f"duplicate control-plane environment key: {key}")
+        parts = shlex.split(raw_value, comments=False, posix=True)
+        if len(parts) > 1:
+            raise SystemExit(f"environment value must be one quoted or unquoted field: {key}")
+        # An empty value parses to no fields at all. Keep it, so the required
+        # check below names it rather than reporting a syntax error.
+        value = parts[0] if parts else ""
+        if any(character in value for character in ("\x00", "\r", "\n")):
+            raise SystemExit(f"environment value contains a control character: {key}")
+        values[key] = value
+for key, value in values.items():
+    encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+    print(f"{key}\t{encoded}")
+PY
+)" || exit 2
+
+# base64 round-trip so a value never passes through a shell word-splitting or
+# expansion step on its way into the variable.
+while IFS=$'\t' read -r name encoded; do
+  [[ -n "$name" ]] || continue
+  value="$(printf '%s' "$encoded" | base64 --decode)"
+  printf -v "$name" '%s' "$value"
+done <<<"$parsed_env"
+
+for name in "${required[@]}"; do
+  if [[ -z "${!name:-}" || "${!name}" == *REPLACE_* ]]; then
+    echo "control-plane value is missing or still a placeholder: $name" >&2
+    exit 2
+  fi
+done
+
+# The sealing key is what makes registry backups recoverable and bootstrap
+# credentials replayable. A wrong-length key exits the app at boot anyway
+# (secrets.ts parseSealingKey); catch it here, before anything is installed.
+if ! python3 -c '
+import base64, sys
+try:
+    key = base64.b64decode(sys.argv[1], validate=True)
+except Exception:
+    raise SystemExit("CP_SECRET_KEY is not valid base64")
+if len(key) != 32:
+    raise SystemExit(f"CP_SECRET_KEY must decode to 32 bytes, got {len(key)}")
+' "$CP_SECRET_KEY"; then
+  exit 2
+fi
+
+if [[ "$CP_BASE_URL" != https://* ]]; then
+  echo "CP_BASE_URL must be an https origin: Caddy terminates TLS for it" >&2
+  exit 2
+fi
+if [[ "$CP_BASE_URL" == */ ]]; then
+  echo "CP_BASE_URL must not have a trailing slash" >&2
+  exit 2
+fi
+if [[ "${CP_COOKIE_SECURE:-true}" == "false" ]]; then
+  echo "CP_COOKIE_SECURE=false is for plain-HTTP local runs only, never a deploy" >&2
+  exit 2
+fi
+# CP_PORT, CP_FLEET_CAP, and CP_RECONCILE_INTERVAL_MS reach index.ts as
+# `Number(process.env.X ?? <default>)`, and `??` fires on null/undefined only —
+# never on the empty string an EnvironmentFile line like `CP_PORT=` passes through
+# perfectly happily. So `CP_PORT=` is Number('') === 0, and 0 tells Express to
+# listen on a kernel-assigned random port: the control plane comes up, healthy, on
+# a port nothing knows, while install.sh polls 8080 for a minute and Caddy proxies
+# to a closed socket. It fails closed, but late and pointing nowhere near the
+# cause. `CP_PORT=http` (NaN) and `CP_FLEET_CAP=` (a cap of 0 — no workspace may
+# ever be provisioned) are the same shape.
+#
+# Absent still means the default. Present has to mean valid.
+check_positive_integer() {
+  local name="$1" max="${2:-}" value
+  # Unset and set-but-empty are different states here, and the difference is the
+  # whole point: the parser above keeps an empty value rather than dropping the
+  # key, so `+` is exactly "the operator wrote this line".
+  [[ -n "${!name+set}" ]] || return 0
+  value="${!name}"
+  # 10# so a zero-padded 08080 is 8080 rather than an invalid octal literal. The
+  # regex runs first and short-circuits, so the arithmetic never sees a non-number.
+  if [[ ! "$value" =~ ^[0-9]+$ ]] || (( 10#$value < 1 )); then
+    echo "$name must be a positive whole number when set, got: '$value'" >&2
+    exit 2
+  fi
+  if [[ -n "$max" ]] && (( 10#$value > max )); then
+    echo "$name must be at most $max when set, got: '$value'" >&2
+    exit 2
+  fi
+}
+# 65535 is the protocol's bound, not one invented here. The other two get no upper
+# bound for the same reason: there is no honest number to put there.
+check_positive_integer CP_PORT 65535
+check_positive_integer CP_FLEET_CAP
+check_positive_integer CP_RECONCILE_INTERVAL_MS
+check_positive_integer CP_MAX_STEP_ATTEMPTS
+# The per-workspace embedding spend cap, in whole dollars. index.ts refuses to
+# boot on a non-positive value for the same reason it is checked here: the cap is
+# what bounds the cost of a key read off a workspace VM.
+check_positive_integer CP_OPENROUTER_KEY_LIMIT_USD
+check_positive_integer OCI_INSTANCE_OCPUS
+check_positive_integer OCI_INSTANCE_MEMORY_GB
+check_positive_integer OCI_INSTANCE_BOOT_VOLUME_GB
+if [[ -n "${OCI_INSTANCE_SHAPE+set}" ]] && [[ ! "$OCI_INSTANCE_SHAPE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "OCI_INSTANCE_SHAPE must be a non-empty shape name when set" >&2
+  exit 2
+fi
+
+# install.sh does not create this file: the operator writes it from escrow beside
+# the env file. Both entrypoints readFileSync it at startup, so an absent key is a
+# crash loop discovered after everything is already installed.
+#
+# The path is pinned, not merely required to exist — the same move the local-Postgres
+# check below makes, and for the same reason: install.sh provisions exactly one
+# location, so an env pointing anywhere else names something install.sh never set
+# up. It chowns one key, at this path, into the service group. A key elsewhere stays
+# root-only and crash-loops the unit; one under /root or /home is invisible to it at
+# any mode (ProtectHome=true). And `-f` alone proves nothing about either, because
+# this check runs as root, and root can stat a file the service will never read.
+expected_key_path="$(dirname "$ENV_FILE")/oci-api-key.pem"
+if [[ "$OCI_PRIVATE_KEY_PATH" != "$expected_key_path" ]]; then
+  echo "OCI_PRIVATE_KEY_PATH must be $expected_key_path: install.sh grants the service group access to that path and no other" >&2
+  exit 2
+fi
+if [[ ! -f "$OCI_PRIVATE_KEY_PATH" ]]; then
+  echo "OCI_PRIVATE_KEY_PATH does not exist: $OCI_PRIVATE_KEY_PATH" >&2
+  exit 2
+fi
+
+# The app and the backup both connect to the local Postgres install.sh sets up.
+# Same shape as the CP_SECRET_KEY check above: python names the reason and exits
+# non-zero, and this turns that into the contract's exit 2.
+if ! python3 - "$CP_DATABASE_URL" <<'PY'; then
+import sys
+from urllib.parse import unquote, urlparse
+
+parsed = urlparse(sys.argv[1])
+if parsed.scheme not in {"postgres", "postgresql"}:
+    raise SystemExit("CP_DATABASE_URL must use postgres:// or postgresql://")
+if parsed.hostname not in {"127.0.0.1", "localhost"}:
+    raise SystemExit("CP_DATABASE_URL must target local Postgres")
+if (parsed.port or 5432) != 5432:
+    raise SystemExit("CP_DATABASE_URL must target local Postgres port 5432")
+name = parsed.path.removeprefix("/")
+user = unquote(parsed.username or "")
+password = unquote(parsed.password or "")
+if not name or not user or not password:
+    raise SystemExit("CP_DATABASE_URL must include database, user, and password")
+for value in (name, user):
+    if not value.replace("_", "a").isalnum() or not (value[0].isalpha() or value[0] == "_"):
+        raise SystemExit("database and role names must be simple SQL identifiers")
+PY
+  exit 2
+fi
+
+echo "2Brain control-plane env contract: OK"

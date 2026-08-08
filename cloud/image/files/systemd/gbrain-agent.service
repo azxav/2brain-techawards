@@ -1,0 +1,60 @@
+[Unit]
+Description=Native OpenClaw Runtime for a 2Brain Agent Workspace
+Documentation=https://github.com/azxav/2brain-techawards/issues
+Wants=network-online.target
+After=network-online.target gbrain-web.service
+RequiresMountsFor=/var/lib/openclaw
+ConditionPathExists=/usr/local/bin/openclaw
+ConditionPathExists=/etc/openclaw/agent.env
+
+[Service]
+Type=simple
+User=openclaw
+Group=openclaw
+WorkingDirectory=/var/lib/openclaw/workspace
+Environment=HOME=/var/lib/openclaw
+Environment=OPENCLAW_HOME=/var/lib/openclaw
+Environment=OPENCLAW_STATE_DIR=/var/lib/openclaw/.openclaw
+Environment=OPENCLAW_WORKSPACE_DIR=/var/lib/openclaw/workspace
+EnvironmentFile=/etc/openclaw/agent.env
+ExecStart=/usr/local/bin/openclaw gateway
+Restart=always
+RestartSec=10s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/openclaw/.openclaw /var/lib/openclaw/browser /var/lib/openclaw/workspace
+InaccessiblePaths=-/etc/gbrain -/var/lib/gbrain -/opt/gbrain -/usr/local/bin/gbrain -/var/lib/postgresql -/run/postgresql -/run/docker.sock -/var/run/docker.sock -/run/systemd/private -/run/systemd/io.systemd.Manager -/run/dbus/system_bus_socket
+TemporaryFileSystem=/tmp:rw,nosuid,nodev,size=256M,mode=1777
+TemporaryFileSystem=/var/tmp:rw,nosuid,nodev,size=256M,mode=1777
+
+CPUQuota=150%
+MemoryHigh=2G
+MemoryMax=3G
+TasksMax=512
+CPUWeight=25
+IOWeight=25
+OOMScoreAdjust=750
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+
+[Install]
+WantedBy=multi-user.target

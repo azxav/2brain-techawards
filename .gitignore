@@ -1,0 +1,60 @@
+node_modules/
+bin/
+# `bin/` above is the compiled CLI (bun build --outfile bin/gbrain), but it matches
+# a bin/ at any depth. These two hold shell sources, not build output.
+!cloud/deploy/bin/
+!cloud/image/files/bin/
+.DS_Store
+*.log
+.env
+.env.*
+!.env.*.example
+# Bun --compile temp artifacts. Each build emits a new hash-named .bun-build
+# file in cwd; glob catches all of them.
+*.bun-build
+.gstack/
+supabase/.temp/
+.claude/skills/
+.idea
+eval/reports/
+eval/data/world-v1/world.html
+
+# BrainBench amara-life-v1 Opus cache (regenerate via eval:generate-amara-life)
+eval/data/amara-life-v1/_cache/
+
+# claw-test E2E build cache (shim + scratch outputs)
+test/.cache/
+
+.claude/
+export/
+
+# Local Packer inputs and manifests for the 2Brain workspace OCI image.
+cloud/image/.artifacts/
+
+# Conductor workspace-local agent artifacts: plans, todos, run-unit-parallel
+# failure logs and per-shard test output. v0.26.4 (run-unit-parallel.sh)
+# writes .context/test-failures.log + .context/test-summary.txt +
+# .context/test-shards/. Workspace-local by design — never committed.
+.context/
+
+# Tier 3 PGLite snapshot fixture (built on demand by build:pglite-snapshot)
+test/fixtures/pglite-snapshot.tar
+test/fixtures/pglite-snapshot.version
+
+# Private brain reports — never check these in (per CLAUDE.md privacy rule)
+reports/network-intelligence/
+
+# artifacts from understand-anything
+.understand-anything
+
+# Scout test logs (CLAUDE.md keeps raw verification output out of the main context)
+.scratch/
+.worktrees/
+
+# Registry dumps from the restore rehearsal in cloud/deploy/README.md. That
+# procedure has to run from the repo root — the sealing-key import resolves
+# nowhere else — so it drops these in the working tree by construction. The
+# sealed one is ciphertext; the opened one is the fleet in plaintext: operator
+# emails, GitHub ids, invite codes. Neither belongs in a commit.
+dump.sealed
+dump.sql

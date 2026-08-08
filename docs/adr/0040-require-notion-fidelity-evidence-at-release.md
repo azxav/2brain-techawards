@@ -1,0 +1,3 @@
+# Gate release on traceable Notion design evidence
+
+Every shipped 2Brain screen, component, state, visual token, and interaction requires a Design Evidence Entry linked to the evidence set accepted by ADR-0026: supplied screenshots, current official public Notion product and help material, or publicly accessible Notion interface captures. Visual QA compares the reference and implementation at the same viewport and state. Divergence is allowed only for WCAG 2.2 AA accessibility, security or authorization clarity, or accurate 2Brain product meaning, and every divergence is documented. Personal preference is not evidence. 2Brain retains original branding and uses appropriately licensed icons rather than Notion trademarks or proprietary assets.

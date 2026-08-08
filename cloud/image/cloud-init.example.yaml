@@ -1,0 +1,34 @@
+#cloud-config
+# 2Brain Workspace VM launch contract.
+#
+# Replace every REPLACE_* value before launch. Secrets should be generated as
+# base64url (letters, digits, '_' and '-') so this EnvironmentFile remains safe
+# for both systemd and the root-owned finalizer. Percent-encode the same local
+# Postgres password inside BOTH database URLs.
+write_files:
+  - path: /etc/gbrain/workspace.env
+    owner: root:gbrain
+    permissions: '0640'
+    content: |
+      GBRAIN_WORKSPACE_NAME="Acme Example Workspace"
+      GBRAIN_SUBDOMAIN=acme-example.workspaces.example.com
+      GBRAIN_WORKSPACE_BASE_URL=https://acme-example.workspaces.example.com
+      GBRAIN_WORKSPACE_TOKEN_SECRET=REPLACE_BASE64URL_TOKEN_SECRET
+      GBRAIN_BOOTSTRAP_CREDENTIAL=REPLACE_BASE64URL_BOOTSTRAP_CREDENTIAL
+      GBRAIN_EMAIL_RESEND_API_KEY=REPLACE_RESEND_API_KEY
+      GBRAIN_EMAIL_FROM="2Brain <no-reply@workspaces.example.com>"
+      GBRAIN_WORKSPACE_PRODUCTION=true
+      OPENROUTER_API_KEY=REPLACE_PER_WORKSPACE_OPENROUTER_KEY
+      OPENROUTER_REFERER=https://acme-example.workspaces.example.com
+      OPENROUTER_TITLE="2Brain Workspace"
+      GBRAIN_EMBEDDING_MODEL=openrouter:openai/text-embedding-3-small
+      GBRAIN_EMBEDDING_DIMENSIONS=1536
+      GBRAIN_DATABASE_URL=postgresql://gbrain:REPLACE_URL_ENCODED_POSTGRES_PASSWORD@127.0.0.1:5432/gbrain
+      TWO_BRAIN_DATABASE_URL=postgresql://gbrain:REPLACE_URL_ENCODED_POSTGRES_PASSWORD@127.0.0.1:5432/gbrain
+
+runcmd:
+  - [/usr/local/sbin/gbrain-cloud-init-finalize]
+
+final_message: >-
+  2Brain workspace bootstrap finished after $UPTIME seconds.
+  Inspect /var/log/cloud-init-output.log and systemctl status gbrain-web.
