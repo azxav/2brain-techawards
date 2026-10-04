@@ -144,7 +144,7 @@ bun run test:full
 
 `bun run verify` is the lint and typecheck gate. `bun run test` is the unit suite. `bun run test:full` adds the slow tests and, when `DATABASE_URL` is set, the database end-to-end tests. See [testing](docs/TESTING.md) and [contributing](CONTRIBUTING.md).
 
-GitHub Actions runs that verify gate and the unit suite on pull requests. The workflows in `.github/workflows/` also cover sharded tests, secret scanning, and Postgres end-to-end checks.
+GitHub Actions on pull requests to `main`: `CI` runs `bun run verify` and four unit-test shards (one process per runner). The `Test` workflow runs the broader sharded suite, serial tests, and slow jobs. `E2E Tests` runs the Postgres checks.
 
 ## Documentation
 
