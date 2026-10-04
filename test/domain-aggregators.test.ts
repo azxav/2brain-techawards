@@ -141,8 +141,6 @@ describe('v0.41 T10: scalar_brier aggregator', () => {
 
     const aliceResult = await aggregateDomainScorecards(engine, 'alice-example', [domain], 'default');
     expect(aliceResult.deal_success.n).toBe(1);
-    const aliceResult = await aggregateDomainScorecards(engine, 'alice-example', [domain], 'default');
-    expect(aliceResult.deal_success.n).toBe(1);
   });
 
   test('filters by page_types (only matching types counted)', async () => {
